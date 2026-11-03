@@ -175,6 +175,30 @@ object Vision {
         return if (bestS > 0.8f && bestS - second > 0.12f) Pair(bestCls, bestS) else Pair(null, bestS)
     }
 
+    val EXTRA = floatArrayOf(.79f, .685f, .90f, .745f)  // 後攻だけに出る柿色の「PP+1」ボタン（自分側＝右下）
+
+    /** EXTRA の範囲のうち柿色のピクセルの割合（0..1） */
+    fun orangeFrac(f: Frame): Float {
+        val x0 = (f.cl + EXTRA[0] * f.cw).toInt().coerceIn(0, f.w - 1)
+        val x1 = (f.cl + EXTRA[2] * f.cw).toInt().coerceIn(x0 + 1, f.w)
+        val y0 = (f.ct + EXTRA[1] * f.ch).toInt().coerceIn(0, f.h - 1)
+        val y1 = (f.ct + EXTRA[3] * f.ch).toInt().coerceIn(y0 + 1, f.h)
+        var hit = 0; var n = 0
+        var y = y0
+        while (y < y1) {
+            var x = x0
+            while (x < x1) {
+                val c = f.px[y * f.w + x]
+                val r = c shr 16 and 255; val g = c shr 8 and 255; val b = c and 255
+                if (r > 150 && g in 60..170 && b < 100 && r - g > 50) hit++
+                n++
+                x += 2
+            }
+            y += 2
+        }
+        return if (n == 0) 0f else hit.toFloat() / n
+    }
+
     /** 上部中央の明るさと赤み（WINは金色に光る） */
     fun topStats(f: Frame): Pair<Float, Float> {
         val a = area(f, TOP, 8, 0)

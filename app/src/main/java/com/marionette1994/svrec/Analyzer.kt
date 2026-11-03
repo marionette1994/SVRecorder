@@ -5,7 +5,7 @@ import android.graphics.Bitmap
 /** OCRで読めた1行（位置はゲーム画面に対する割合） */
 data class Line(val text: String, val cx: Float, val cy: Float)
 
-enum class Kind { VS, RESULT, NONE }
+enum class Kind { VS, RESULT, BATTLE, NONE }
 
 class Obs(
     val kind: Kind,
@@ -22,6 +22,8 @@ class Obs(
     val outcome: String? = null,
     val confident: Boolean = false,
     val debug: String = "",
+    val extraPP: Boolean? = null,   // BATTLE: true=自分にエクストラPPあり（後攻）/ false=無し（先攻）/ null=判断できず
+    val extraByText: Boolean = false, // 「PP+1」の文字まで読めた（色だけより確か）
 )
 
 object Analyzer {
@@ -85,6 +87,27 @@ object Analyzer {
             return Obs(Kind.RESULT, outcome = outcome, confident = confident, debug = dbg)
         }
 
+        // ---- 対戦中：後攻だけに出る柿色の「PP+1」ボタンで先後を見る ----
+        val inBattle = lines.any { it.cx in 0.76f..0.92f && it.cy in 0.52f..0.68f && it.text.uppercase().contains("PP") } ||
+            lines.any { it.cx in 0.76f..0.92f && it.cy in 0.3f..0.55f && it.text.contains("ターン") }
+        if (inBattle) {
+            val orange = Vision.orangeFrac(f)
+            val btnText = lines.any { l ->
+                val t = l.text.uppercase().replace(" ", "")
+                l.cx in 0.76f..0.93f && l.cy in 0.65f..0.8f &&
+                    (t.contains("PP+1") || t.contains("PP十1") || t.contains("PP＋1") || t.contains("再使用"))
+            }
+            val extra: Boolean? = when {
+                btnText -> true
+                orange >= 0.45f -> true
+                orange < 0.08f -> false
+                else -> null
+            }
+            val dbg = "対戦中 | エクストラPP:${when (extra) { true -> "あり→後攻"; false -> "なし→先攻"; null -> "不明" }}" +
+                " | 柿色${(orange * 100).toInt()}% 文字:$btnText"
+            return Obs(Kind.BATTLE, extraPP = extra, extraByText = btnText, debug = dbg)
+        }
+
         val sample = lines.take(6).joinToString(" / ") { it.text }
         return Obs(Kind.NONE, debug = "—（対象外の画面）| ${g.info} | 明るさ${lum.toInt()} | 読取: $sample")
     }
@@ -132,6 +155,9 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
         var oppName = ""
         var thumb: Bitmap? = null
         var thumbStrength = 0f
+        var extraYes = 0      // 対戦中に自分側のPP+1ボタンを見た回数（後攻の証拠）
+        var extraNo = 0       // 対戦中なのにボタンが無かった回数（先攻の証拠）
+        val hasBattle get() = extraYes + extraNo > 0
 
         fun add(o: Obs, now: Long) {
             lastSeen = now
@@ -146,22 +172,39 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             if (!o.oppName.isNullOrBlank()) oppName = o.oppName
         }
 
-        /** 先後の結論と、それに自信があるか */
+        /** エクストラPPから見た先後（十分な証拠がなければ null） */
+        fun extraOrder(): String? = when {
+            extraYes >= 3 && extraYes * 2 >= extraNo -> "second"
+            extraNo >= 6 && extraYes == 0 -> "first"
+            else -> null
+        }
+
+        /** 先後の結論と、それに自信があるか（VS画面の照合 と 対戦中のエクストラPP の2つで確かめる） */
         fun decideOrder(): Pair<String?, Boolean> {
+            var vs: String? = null
+            var vsSure = false
             if (glyphOrder.isNotEmpty()) {
                 val best = glyphOrder.maxByOrNull { it.value }!!
                 val other = glyphOrder.filterKeys { it != best.key }.values.sum()
-                // 複数フレームで一致し、反対の票がほぼ無いときだけ「確実」
-                return Pair(best.key, best.value >= 2 && other * 4 <= best.value)
+                vs = best.key
+                vsSure = best.value >= 2 && other * 4 <= best.value
+            } else {
+                vs = ocrOrder.maxByOrNull { it.value }?.key
             }
-            val o = ocrOrder.maxByOrNull { it.value }?.key
-            return Pair(o, false)
+            val ex = extraOrder()
+            return when {
+                ex != null && vs != null && ex == vs -> Pair(vs, true)          // 2つが一致 → 確定
+                // 食い違い → 「PP+1」の文字が何度も読めていればそちらを、そうでなければVS画面を採用して要確認
+                ex != null && vs != null -> Pair(if (ex == "second" && extraYes >= 4) ex else vs, false)
+                ex != null -> Pair(ex, extraYes >= 4 || extraNo >= 10)          // VS画面を取り逃した
+                else -> Pair(vs, vsSure)
+            }
         }
 
         fun voteText(): String {
             val gf = glyphOrder["first"] ?: 0; val gs = glyphOrder["second"] ?: 0
             val of = ocrOrder["first"] ?: 0; val os = ocrOrder["second"] ?: 0
-            return "先後の票 画像:先$gf/後$gs 文字:先$of/後$os"
+            return "先後の票 画像:先$gf/後$gs 文字:先$of/後$os PP+1:あり$extraYes/なし$extraNo"
         }
     }
 
@@ -179,8 +222,8 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             Kind.VS -> {
                 hold?.let { commit(it, now) }
                 latched = false
-                // VS画面は数秒で終わる。15秒以上あいたら別の試合として数え直す
-                val p = pending?.takeIf { now - it.lastSeen < 15_000 }
+                // VS画面は数秒で終わる。15秒以上あいたら、または対戦が始まった後なら別の試合として数え直す
+                val p = pending?.takeIf { now - it.lastSeen < 15_000 && !it.hasBattle }
                     ?: Pending(now).also { pending?.thumb?.recycle(); pending = it }
                 p.add(o, now)
             }
@@ -191,6 +234,17 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
                     return
                 }
                 commit(o, now)
+            }
+            Kind.BATTLE -> {
+                hold?.let { commit(it, now) }
+                latched = false                       // 対戦中＝前のリザルトは終わっている
+                val p = pending ?: Pending(now).also { pending = it }
+                p.lastSeen = now
+                when (o.extraPP) {
+                    true -> p.extraYes += if (o.extraByText) 2 else 1
+                    false -> p.extraNo++
+                    null -> {}
+                }
             }
             Kind.NONE -> {
                 hold?.let { commit(it, now) }
