@@ -111,7 +111,7 @@ class CaptureService : Service() {
             override fun onCapturedContentResize(width: Int, height: Int) {
                 h.post {
                     contentSizeMode = true
-                    safeResize(width, height)
+                    safeResize(width, height, true)
                 }
             }
         }, h)
@@ -149,12 +149,18 @@ class CaptureService : Service() {
         return Pair(dm.widthPixels, dm.heightPixels)
     }
 
-    private fun safeResize(w: Int, h: Int) {
-        try { resizeTo(w, h) } catch (e: Exception) { Store.setDebug("サイズ変更エラー: $e") }
+    private fun safeResize(w: Int, h: Int, keepAspect: Boolean = false) {
+        try { resizeTo(w, h, keepAspect) } catch (e: Exception) { Store.setDebug("サイズ変更エラー: $e") }
     }
 
-    private fun resizeTo(srcW: Int, srcH: Int) {
-        if (srcW <= 0 || srcH <= 0) return
+    /**
+     * キャプチャ先の大きさを決める。シャドバは横画面なので、端末の向きに関係なく常に横長で作る。
+     * （縦向きで作ってから resize すると、機種によっては映像が中央に小さく縮んだままになるため）
+     */
+    private fun resizeTo(rawW: Int, rawH: Int, keepAspect: Boolean = false) {
+        if (rawW <= 0 || rawH <= 0) return
+        val srcW = if (keepAspect) rawW else maxOf(rawW, rawH)
+        val srcH = if (keepAspect) rawH else minOf(rawW, rawH)
         val p = projection ?: return
         val s = minOf(1f, LONG_SIDE.toFloat() / maxOf(srcW, srcH))
         val w = maxOf(2, (srcW * s).toInt() and 1.inv())
@@ -192,11 +198,6 @@ class CaptureService : Service() {
 
     private fun tick() {
         val now = SystemClock.elapsedRealtime()
-        if (!contentSizeMode && now - lastSizeCheck > 2000) {
-            lastSizeCheck = now
-            val (w, h) = displaySize()       // 縦⇔横の回転に追従
-            resizeTo(w, h)
-        }
         val r = reader ?: return
         val img = r.acquireLatestImage() ?: return
         val bmp = try { toBitmap(img) } finally { img.close() }
@@ -226,7 +227,7 @@ class CaptureService : Service() {
         val px = pxBuf
         bmp.getPixels(px, 0, w, 0, 0, w, h)
         val f = Frame(px, w, h)
-        if (f.cw < w * 0.5f || f.ch < h * 0.5f) return   // ほぼ真っ黒（画面オフなど）
+        if (f.cw < w * 0.25f || f.ch < h * 0.25f) return   // ほぼ真っ黒（画面オフなど）
         if (f.cw < f.ch) {                                  // 縦画面＝シャドバの対戦画面ではない
             Store.setDebug("縦画面のため待機中")
             return
@@ -241,7 +242,7 @@ class CaptureService : Service() {
         } else {
             Analyzer.fast(f, g)
         }
-        maybeSaveDebug(bmp, obsOrNull, g, now)
+        maybeSaveDebug(bmp, f, obsOrNull, g, now)
         val obs = obsOrNull ?: return                       // 何も判定できないフレームは捨てる
         rec.feed(obs, System.currentTimeMillis())
         // 先後を画像で判定できたフレームのうち、一番くっきりしたものを開始画面として残す
@@ -251,13 +252,14 @@ class CaptureService : Service() {
             rec.setThumb(Bitmap.createScaledBitmap(bmp, tw, th, true), obs.glyphStrength)
         }
         val votes = rec.voteText()
-        Store.setDebug(if (votes.isEmpty()) obs.debug else obs.debug + "\n" + votes)
+        val size = "キャプチャ${w}x${h} ゲーム部分${f.cw.toInt()}x${f.ch.toInt()}"
+        Store.setDebug((if (votes.isEmpty()) obs.debug else obs.debug + "\n" + votes) + "\n" + size)
     }
 
     private var lastDebugSave = 0L
 
     /** 診断モード中は、アプリが実際に見ている画面を約0.7秒ごとに Pictures/SVRecorder に保存する */
-    private fun maybeSaveDebug(bmp: Bitmap, obs: Obs?, g: Vision.GlyphResult, now: Long) {
+    private fun maybeSaveDebug(bmp: Bitmap, f: Frame, obs: Obs?, g: Vision.GlyphResult, now: Long) {
         if (System.currentTimeMillis() > Store.debugCaptureUntil) return
         if (now - lastDebugSave < 700) return
         lastDebugSave = now
@@ -265,7 +267,7 @@ class CaptureService : Service() {
             val t = java.text.SimpleDateFormat("HHmmss_SSS", java.util.Locale.JAPAN).format(java.util.Date())
             val kind = obs?.kind?.name ?: "SKIP"
             val sc = g.info.replace(Regex("[^0-9.]+"), "-").trim('-')
-            val name = "svrec_${t}_${kind}_${sc}.jpg"
+            val name = "svrec_${t}_${kind}_${sc}_area${f.cl}-${f.ct}-${f.cr}-${f.cb}.jpg"
             val values = android.content.ContentValues().apply {
                 put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
                 put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -277,21 +279,32 @@ class CaptureService : Service() {
         }
     }
 
+    /** ゲーム画面の部分だけを切り出し、小さければ拡大してから文字認識する */
     private fun ocr(bmp: Bitmap, f: Frame): List<Line> {
         val rec = recognizer ?: return emptyList()
-        val text = Tasks.await(rec.process(InputImage.fromBitmap(bmp, 0)), 5, TimeUnit.SECONDS)
-        val out = ArrayList<Line>()
-        for (block in text.textBlocks) for (line in block.lines) {
-            val box = line.boundingBox ?: continue
-            out.add(
-                Line(
-                    line.text,
-                    (box.exactCenterX() - f.cl) / f.cw,
-                    (box.exactCenterY() - f.ct) / f.ch,
-                ),
-            )
+        val cw = f.cr - f.cl
+        val ch = f.cb - f.ct
+        var img = bmp
+        val owned = ArrayList<Bitmap>()
+        if (cw < bmp.width || ch < bmp.height) {
+            img = Bitmap.createBitmap(bmp, f.cl, f.ct, cw, ch).also { owned.add(it) }
         }
-        return out
+        if (img.width < 1500) {
+            val tw = 1600
+            val th = maxOf(1, img.height * tw / img.width)
+            img = Bitmap.createScaledBitmap(img, tw, th, true).also { owned.add(it) }
+        }
+        try {
+            val text = Tasks.await(rec.process(InputImage.fromBitmap(img, 0)), 5, TimeUnit.SECONDS)
+            val out = ArrayList<Line>()
+            for (block in text.textBlocks) for (line in block.lines) {
+                val box = line.boundingBox ?: continue
+                out.add(Line(line.text, box.exactCenterX() / img.width, box.exactCenterY() / img.height))
+            }
+            return out
+        } finally {
+            owned.forEach { if (it !== bmp) it.recycle() }
+        }
     }
 
     // ---------- 記録と通知 ----------

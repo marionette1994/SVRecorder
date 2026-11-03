@@ -21,17 +21,18 @@ class Frame(val px: IntArray, val w: Int, val h: Int) {
             for (k in 1..9) if (lum(px[y * w + min(w - 1, w * k / 10)]) > 4) return false
             return true
         }
+        // 黒い帯は、映像が中央に縮んで映ったときに四方に大きく出ることがあるので、半分手前まで探す
         var x = 0
-        while (x < w / 5 && colBlack(x)) x++
+        while (x < w * 9 / 20 && colBlack(x)) x++
         cl = x
         x = w - 1
-        while (x > w * 4 / 5 && colBlack(x)) x--
+        while (x > w * 11 / 20 && colBlack(x)) x--
         cr = x + 1
         var y = 0
-        while (y < h / 5 && rowBlack(y)) y++
+        while (y < h * 9 / 20 && rowBlack(y)) y++
         ct = y
         y = h - 1
-        while (y > h * 4 / 5 && rowBlack(y)) y--
+        while (y > h * 11 / 20 && rowBlack(y)) y--
         cb = y + 1
     }
 
