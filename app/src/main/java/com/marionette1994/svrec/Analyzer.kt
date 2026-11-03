@@ -24,10 +24,12 @@ class Obs(
     val debug: String = "",
     val ppSecond: Int = 0,   // BATTLE: 後攻の証拠の重み（自分側にPP+1の文字=3、色だけ=1）
     val ppFirst: Int = 0,    // BATTLE: 先攻の証拠の重み（相手側にPP+1の文字=3、どこにも無い=1）
+    val mulligan: Boolean = false, // マリガン画面（＝新しい試合が始まった確かな印）
 )
 
 object Analyzer {
     private val RESULT_WORDS = listOf("TOTAL", "再戦", "ボーナス", "累積", "NEXT", "MASTER", "ランク")
+    private val STRONG_WORDS = listOf("TOTAL", "再戦", "ボーナス")
 
     /**
      * OCRなしの高速判定（0.2秒ごと）。カードが出揃ったVS画面なら先後とアイコンを返す。
@@ -80,6 +82,7 @@ object Analyzer {
                     Kind.BATTLE,
                     ppSecond = if (mull == "second") 4 else 0,
                     ppFirst = if (mull == "first") 4 else 0,
+                    mulligan = true,
                     debug = dbg,
                 )
             }
@@ -88,8 +91,10 @@ object Analyzer {
         // ---- リザルト画面 ----
         val up = lines.map { it.copy(text = it.text.uppercase().replace(" ", "").replace("　", "")) }
         val hits = RESULT_WORDS.count { k -> up.any { it.text.contains(k) } }
+        // ロビーやランク画面にも「ランク」「MASTER」「NEXT」は出るので、リザルト特有の語を1つ以上必須にする
+        val strong = STRONG_WORDS.count { k -> up.any { it.text.contains(k) } }
         val (lum, rb) = Vision.topStats(f)
-        if (hits >= 2) {
+        if (hits >= 2 && strong >= 1) {
             val top = up.filter { it.cy < 0.24f && it.cx in 0.28f..0.72f }
             val textWin = top.any { it.text.contains("WIN") || it.text.contains("W1N") || it.text.contains("VVIN") } ||
                 up.any { it.text.contains("勝利") }
@@ -268,6 +273,8 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             }
             Kind.RESULT -> {
                 if (latched) { lastResultSeen = now; return }
+                // 対戦の流れ（VS・マリガン・対戦中）を見ていないリザルトらしき画面は記録しない（二重記録の防止）
+                if (pending == null) return
                 if (!o.confident && (hold == null || now - holdSince < 3000)) {
                     if (hold == null) { hold = o; holdSince = now }
                     return
@@ -276,7 +283,9 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             }
             Kind.BATTLE -> {
                 hold?.let { commit(it, now) }
-                latched = false                       // 対戦中＝前のリザルトは終わっている
+                // 記録した直後は、リザルトの演出の裏に盤面が一瞬見えても新しい試合とはみなさない
+                if (latched && !o.mulligan && now - lastResultSeen < 45_000) return
+                latched = false
                 val p = pending ?: Pending(now).also { pending = it }
                 p.lastSeen = now
                 p.battleFrames++
@@ -285,7 +294,7 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             }
             Kind.NONE -> {
                 hold?.let { commit(it, now) }
-                if (latched && now - lastResultSeen > 90_000) latched = false
+                // 記録済みの状態は、次の対戦（VS・マリガン・対戦中の画面）を見るまで解除しない
             }
         }
     }
