@@ -117,6 +117,7 @@ object Store {
         prefs = ctx.applicationContext.getSharedPreferences("svrec", Context.MODE_PRIVATE)
         loadMatches()
         loadIcons()
+        loadTypes()
     }
 
     // ---------- 設定 ----------
@@ -126,6 +127,52 @@ object Store {
     var deck: String
         get() = prefs.getString("deck", "") ?: ""
         set(v) { prefs.edit().putString("deck", v).apply() }
+    /** この時刻まで、診断用に画面を保存する */
+    @Volatile var debugCaptureUntil = 0L
+
+    // ---------- 相手デッキタイプの候補 ----------
+    private val importedTypes = mutableMapOf<String, MutableMap<String, Int>>()   // クラス → (タイプ → 回数)
+
+    /** そのクラスで使われたデッキタイプを、多い順に（このアプリの記録 ＋ SVTから読み込んだ分） */
+    @Synchronized
+    fun typeCandidates(cls: String?): List<String> {
+        val count = mutableMapOf<String, Int>()
+        val keys = if (cls == null) importedTypes.keys.toList() else listOf(cls)
+        keys.forEach { k -> importedTypes[k]?.forEach { (t, n) -> count.merge(t, n, Int::plus) } }
+        matches.filter { (cls == null || it.oppClass == cls) && it.oppType.isNotBlank() }
+            .forEach { count.merge(it.oppType, 3, Int::plus) }   // 最近の自分の記録を少し優先
+        return count.entries.sortedByDescending { it.value }.map { it.key }
+    }
+
+    /** SVTのCSVから「相手のクラス」「相手のデッキタイプ」を読み込み、候補に加える。戻り値は種類数 */
+    @Synchronized
+    fun importTypes(rows: List<Pair<String, String>>): Int {
+        rows.forEach { (cls, t) -> importedTypes.getOrPut(cls) { mutableMapOf() }.merge(t, 1, Int::plus) }
+        saveTypes()
+        return importedTypes.values.sumOf { it.size }
+    }
+
+    private fun loadTypes() {
+        val f = File(dir, "types.json")
+        if (!f.exists()) return
+        try {
+            val o = JSONObject(f.readText())
+            for (k in o.keys()) {
+                val inner = o.getJSONObject(k)
+                val m = mutableMapOf<String, Int>()
+                for (t in inner.keys()) m[t] = inner.getInt(t)
+                importedTypes[k] = m
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun saveTypes() {
+        val o = JSONObject()
+        importedTypes.forEach { (k, m) -> o.put(k, JSONObject().apply { m.forEach { (t, n) -> put(t, n) } }) }
+        File(dir, "types.json").writeText(o.toString())
+    }
+
     var defaultMyClass: String?
         get() = prefs.getString("myClass", null)
         set(v) { prefs.edit().putString("myClass", v).apply() }

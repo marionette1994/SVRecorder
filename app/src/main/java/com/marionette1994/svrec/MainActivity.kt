@@ -31,6 +31,7 @@ import java.util.Locale
 class MainActivity : Activity() {
     private val reqCapture = 1
     private val reqExport = 2
+    private val reqImportTypes = 3
 
     internal val bg = Color.parseColor("#14141c")
     internal val card = Color.parseColor("#1f1f2b")
@@ -160,6 +161,7 @@ class MainActivity : Activity() {
         set.addView(edit("SVTのデッキ名と同じにする（空ならクラス名）", Store.deck) { Store.deck = it })
         myClassBtn = btn("") { chooseDefaultClass() }
         set.addView(myClassBtn)
+        set.addView(btn("SVTのCSVから相手デッキタイプの候補を読み込む") { startImportTypes() })
 
         val rec = section("記録", page)
         summaryTv = tv("", 13f)
@@ -172,6 +174,14 @@ class MainActivity : Activity() {
         val diag = section("診断（直近に読み取った内容）", page)
         diagTv = tv("", 11f, sub).apply { typeface = Typeface.MONOSPACE }
         diag.addView(diagTv)
+        diag.addView(btn("診断用に90秒間、画面を保存する") {
+            if (!Store.running) {
+                Toast.makeText(this, "先に「記録を開始」してください", Toast.LENGTH_SHORT).show()
+            } else {
+                Store.debugCaptureUntil = System.currentTimeMillis() + 90_000
+                Toast.makeText(this, "90秒間、約1秒ごとに画面を「写真/Pictures/SVRecorder」に保存します。対戦を始めてください", Toast.LENGTH_LONG).show()
+            }
+        })
         diag.addView(tv("クラスの絵を覚えている数：", 11f, sub).apply { id = View.generateViewId(); tag = "icons" })
 
         return ScrollView(this).apply {
@@ -274,6 +284,29 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "記録を開始しました。シャドバを開いてください", Toast.LENGTH_LONG).show()
             } else {
                 Toast.makeText(this, "画面の記録が許可されませんでした", Toast.LENGTH_SHORT).show()
+            }
+        } else if (requestCode == reqImportTypes && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            try {
+                val text = contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
+                val rows = parseCsv(text)
+                val header = rows.firstOrNull()?.map { it.trim() } ?: emptyList()
+                val ci = header.indexOf("相手のクラス")
+                val ti = header.indexOf("相手のデッキタイプ")
+                if (ci < 0 || ti < 0) {
+                    Toast.makeText(this, "SVTで出力したCSVを選んでください", Toast.LENGTH_LONG).show()
+                    return
+                }
+                val nameToId = Classes.names.entries.associate { (k, v) -> v to k }
+                val pairs = rows.drop(1).mapNotNull { r ->
+                    val c = nameToId[r.getOrNull(ci)?.trim()] ?: return@mapNotNull null
+                    val t = r.getOrNull(ti)?.trim().orEmpty()
+                    if (t.isEmpty()) null else c to t
+                }
+                val n = Store.importTypes(pairs)
+                Toast.makeText(this, "${pairs.size}試合分を読み込みました（候補 ${n}種類）", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "読み込みに失敗しました: ${e.message}", Toast.LENGTH_LONG).show()
             }
         } else if (requestCode == reqExport && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
@@ -386,7 +419,7 @@ class MainActivity : Activity() {
                         Store.update(id) { it.oppClass = c; recheck(it) }
                         Vision.decode(m.oppIcon)?.let { Store.learnIcon(c, it, force = true) }
                     }
-                    4 -> inputOppType(id, m.oppType)
+                    4 -> chooseOppType(m)
                     5 -> inputText("自分のデッキ名", m.deck, "空ならクラス名") { v -> Store.update(id) { it.deck = v } }
                     6 -> inputText("シリーズ", m.series, "SVTのシリーズ名") { v -> Store.update(id) { it.series = v } }
                 }
@@ -443,10 +476,64 @@ class MainActivity : Activity() {
             .setNegativeButton("やめる", null).show()
     }
 
-    private fun inputOppType(id: String, cur: String) {
-        val e = EditText(this).apply { setText(cur); hint = "例：財宝ネメシス" }
-        AlertDialog.Builder(this).setTitle("相手のデッキタイプ").setView(e)
-            .setPositiveButton("保存") { _, _ -> Store.update(id) { it.oppType = e.text.toString().trim() } }
-            .setNegativeButton("やめる", null).show()
+    /** 相手のデッキタイプを選択式で。候補はそのクラスで過去に使った名前（多い順） */
+    private fun chooseOppType(m: Match) {
+        val cands = Store.typeCandidates(m.oppClass).take(30)
+        val items = cands + listOf("＋ 新しく入力", "（未入力に戻す）")
+        val title = "相手のデッキタイプ（${Classes.name(m.oppClass)}）"
+        AlertDialog.Builder(this).setTitle(title)
+            .setItems(items.toTypedArray()) { _, w ->
+                when {
+                    w < cands.size -> Store.update(m.id) { it.oppType = cands[w] }
+                    w == cands.size -> {
+                        val e = EditText(this).apply { setText(m.oppType); hint = "例：財宝ネメシス" }
+                        AlertDialog.Builder(this).setTitle(title).setView(e)
+                            .setPositiveButton("保存") { _, _ -> Store.update(m.id) { it.oppType = e.text.toString().trim() } }
+                            .setNegativeButton("やめる", null).show()
+                    }
+                    else -> Store.update(m.id) { it.oppType = "" }
+                }
+            }
+            .show()
+    }
+
+    private fun startImportTypes() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/csv", "text/comma-separated-values", "text/plain", "application/vnd.ms-excel"))
+        @Suppress("DEPRECATION")
+        startActivityForResult(i, reqImportTypes)
+    }
+
+    private fun parseCsv(src: String): List<List<String>> {
+        val text = src.removePrefix("\uFEFF")
+        val rows = mutableListOf<List<String>>()
+        var row = mutableListOf<String>()
+        val cur = StringBuilder()
+        var q = false
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            if (q) {
+                if (ch == '"') {
+                    if (i + 1 < text.length && text[i + 1] == '"') { cur.append('"'); i++ } else q = false
+                } else cur.append(ch)
+            } else when (ch) {
+                '"' -> q = true
+                ',' -> { row.add(cur.toString()); cur.setLength(0) }
+                '\n', '\r' -> {
+                    if (ch == '\r' && i + 1 < text.length && text[i + 1] == '\n') i++
+                    row.add(cur.toString()); cur.setLength(0)
+                    if (row.any { it.isNotEmpty() }) rows.add(row)
+                    row = mutableListOf()
+                }
+                else -> cur.append(ch)
+            }
+            i++
+        }
+        row.add(cur.toString())
+        if (row.any { it.isNotEmpty() }) rows.add(row)
+        return rows
     }
 }

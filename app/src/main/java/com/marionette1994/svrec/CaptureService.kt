@@ -235,12 +235,14 @@ class CaptureService : Service() {
         val now = SystemClock.elapsedRealtime()
         val g = Vision.glyphOrder(f)
         val needOcr = now - lastOcr >= (if (g.order != null) OCR_VS_MS else OCR_MS)
-        val obs = if (needOcr) {
+        val obsOrNull = if (needOcr) {
             lastOcr = now
             Analyzer.analyze(f, ocr(bmp, f), g)
         } else {
-            Analyzer.fast(f, g) ?: return                   // 何も判定できないフレームは捨てる
+            Analyzer.fast(f, g)
         }
+        maybeSaveDebug(bmp, obsOrNull, g, now)
+        val obs = obsOrNull ?: return                       // 何も判定できないフレームは捨てる
         rec.feed(obs, System.currentTimeMillis())
         // 先後を画像で判定できたフレームのうち、一番くっきりしたものを開始画面として残す
         if (obs.kind == Kind.VS && obs.orderByGlyph && rec.wantsThumb(obs.glyphStrength)) {
@@ -250,6 +252,29 @@ class CaptureService : Service() {
         }
         val votes = rec.voteText()
         Store.setDebug(if (votes.isEmpty()) obs.debug else obs.debug + "\n" + votes)
+    }
+
+    private var lastDebugSave = 0L
+
+    /** 診断モード中は、アプリが実際に見ている画面を約0.7秒ごとに Pictures/SVRecorder に保存する */
+    private fun maybeSaveDebug(bmp: Bitmap, obs: Obs?, g: Vision.GlyphResult, now: Long) {
+        if (System.currentTimeMillis() > Store.debugCaptureUntil) return
+        if (now - lastDebugSave < 700) return
+        lastDebugSave = now
+        try {
+            val t = java.text.SimpleDateFormat("HHmmss_SSS", java.util.Locale.JAPAN).format(java.util.Date())
+            val kind = obs?.kind?.name ?: "SKIP"
+            val sc = g.info.replace(Regex("[^0-9.]+"), "-").trim('-')
+            val name = "svrec_${t}_${kind}_${sc}.jpg"
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SVRecorder")
+            }
+            val uri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return
+            contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+        } catch (_: Exception) {
+        }
     }
 
     private fun ocr(bmp: Bitmap, f: Frame): List<Line> {
