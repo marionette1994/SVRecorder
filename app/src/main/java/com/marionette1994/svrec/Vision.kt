@@ -134,7 +134,8 @@ object Vision {
         return best
     }
 
-    class GlyphResult(val order: String?, val info: String)
+    /** strength = 判定に使った左右カードの一致度のうち低い方（0..1）。高いほどカードが出揃っている */
+    class GlyphResult(val order: String?, val strength: Float, val info: String)
 
     /** 対戦開始画面の左右カードから先攻/後攻を判定（左が自分） */
     fun glyphOrder(f: Frame): GlyphResult {
@@ -146,14 +147,18 @@ object Vision {
         val leftSecond = ls > 0.78f && ls - lf > 0.2f
         val rightFirst = rf > 0.78f && rf - rs > 0.2f
         val rightSecond = rs > 0.78f && rs - rf > 0.2f
+        // 左右どちらのカードも出揃って、互いに矛盾しないときだけ採用（演出の途中フレームは捨てる）
         val order = when {
-            leftFirst && (rightSecond || rs > 0.6f) -> "first"
-            leftSecond && (rightFirst || rf > 0.6f) -> "second"
-            rightSecond && lf > 0.6f -> "first"
-            rightFirst && ls > 0.6f -> "second"
+            leftFirst && rightSecond -> "first"
+            leftSecond && rightFirst -> "second"
             else -> null
         }
-        return GlyphResult(order, "先後 L先%.2f L後%.2f R先%.2f R後%.2f".format(lf, ls, rf, rs))
+        val strength = when (order) {
+            "first" -> min(lf, rs)
+            "second" -> min(ls, rf)
+            else -> 0f
+        }
+        return GlyphResult(order, strength, "先後 L先%.2f L後%.2f R先%.2f R後%.2f".format(lf, ls, rf, rs))
     }
 
     /** アイコン領域を既知のクラスと照合。確信が持てなければ null */

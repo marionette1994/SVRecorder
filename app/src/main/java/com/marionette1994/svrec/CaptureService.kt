@@ -40,7 +40,9 @@ class CaptureService : Service() {
         private const val CH = "rec"
         private const val NID = 1
         private const val LONG_SIDE = 1600
-        private const val INTERVAL_MS = 700L
+        private const val INTERVAL_MS = 200L     // 画像照合（軽い）は0.2秒ごと
+        private const val OCR_MS = 900L          // 文字認識（重い）は約1秒ごと
+        private const val OCR_VS_MS = 400L       // VS画面が見えている間は文字認識も速める
     }
 
     private var projection: MediaProjection? = null
@@ -56,6 +58,8 @@ class CaptureService : Service() {
     private var contentSizeMode = false
     private var lastSizeCheck = 0L
     private var lastLine = "画面を見張っています"
+    private var lastOcr = 0L
+    private var pxBuf = IntArray(0)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -95,7 +99,7 @@ class CaptureService : Service() {
         val h = Handler(t.looper)
         handler = h
         recognizer = TextRecognition.getClient(JapaneseTextRecognizerOptions.Builder().build())
-        recorder = Recorder { m -> onRecorded(m) }
+        recorder = Recorder { m, thumb -> onRecorded(m, thumb) }
         dpi = resources.displayMetrics.densityDpi
 
         p.registerCallback(object : MediaProjection.Callback() {
@@ -218,7 +222,8 @@ class CaptureService : Service() {
     private fun process(bmp: Bitmap) {
         val w = bmp.width
         val h = bmp.height
-        val px = IntArray(w * h)
+        if (pxBuf.size != w * h) pxBuf = IntArray(w * h)   // 毎フレーム確保しない
+        val px = pxBuf
         bmp.getPixels(px, 0, w, 0, 0, w, h)
         val f = Frame(px, w, h)
         if (f.cw < w * 0.5f || f.ch < h * 0.5f) return   // ほぼ真っ黒（画面オフなど）
@@ -226,10 +231,25 @@ class CaptureService : Service() {
             Store.setDebug("縦画面のため待機中")
             return
         }
-        val lines = ocr(bmp, f)
-        val obs = Analyzer.analyze(f, lines)
-        recorder?.feed(obs, System.currentTimeMillis())
-        Store.setDebug(obs.debug)
+        val rec = recorder ?: return
+        val now = SystemClock.elapsedRealtime()
+        val g = Vision.glyphOrder(f)
+        val needOcr = now - lastOcr >= (if (g.order != null) OCR_VS_MS else OCR_MS)
+        val obs = if (needOcr) {
+            lastOcr = now
+            Analyzer.analyze(f, ocr(bmp, f), g)
+        } else {
+            Analyzer.fast(f, g) ?: return                   // 何も判定できないフレームは捨てる
+        }
+        rec.feed(obs, System.currentTimeMillis())
+        // 先後を画像で判定できたフレームのうち、一番くっきりしたものを開始画面として残す
+        if (obs.kind == Kind.VS && obs.orderByGlyph && rec.wantsThumb(obs.glyphStrength)) {
+            val tw = 640
+            val th = maxOf(1, h * tw / w)
+            rec.setThumb(Bitmap.createScaledBitmap(bmp, tw, th, true), obs.glyphStrength)
+        }
+        val votes = rec.voteText()
+        Store.setDebug(if (votes.isEmpty()) obs.debug else obs.debug + "\n" + votes)
     }
 
     private fun ocr(bmp: Bitmap, f: Frame): List<Line> {
@@ -251,7 +271,14 @@ class CaptureService : Service() {
 
     // ---------- 記録と通知 ----------
 
-    private fun onRecorded(m: Match) {
+    private fun onRecorded(m: Match, thumb: Bitmap?) {
+        if (thumb != null) {
+            try {
+                Store.thumbFile(m.id).outputStream().use { thumb.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            } catch (_: Exception) {
+            }
+            thumb.recycle()
+        }
         Store.addMatch(m)
         val res = if (m.result == "win") "勝利" else "敗北"
         val warn = if (m.needsCheck) " ⚠要確認" else ""

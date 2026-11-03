@@ -160,7 +160,11 @@ object Store {
         changed()
     }
 
+    /** 記録に添える開始（VS）画面の画像 */
+    fun thumbFile(id: String): File = File(File(dir, "vs").apply { mkdirs() }, "$id.jpg")
+
     fun delete(id: String) {
+        thumbFile(id).delete()
         synchronized(this) { matches.removeAll { it.id == id }; saveMatches() }
         changed()
     }
@@ -174,6 +178,7 @@ object Store {
         val n: Int
         synchronized(this) {
             val before = matches.size
+            matches.filter { it.exported }.forEach { thumbFile(it.id).delete() }
             matches.removeAll { it.exported }
             n = before - matches.size
             saveMatches()

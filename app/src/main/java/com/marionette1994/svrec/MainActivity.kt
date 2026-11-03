@@ -5,6 +5,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -18,6 +19,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -357,31 +359,55 @@ class MainActivity : Activity() {
             "自分のデッキ名：${m.deckLabel()}",
             "シリーズ：${m.series.ifBlank { "未設定" }}",
         )
+        val thumb = Store.thumbFile(m.id)
+        if (thumb.exists()) items.add(0, "開始画面を見る（先攻・後攻の確認）")
         if (m.needsCheck) items.add("確認済みにする（⚠を外す）")
         items.add("この記録を削除")
         AlertDialog.Builder(this)
             .setItems(items.toTypedArray()) { _, which ->
-                when (items[which]) {
-                    items[0] -> Store.update(id) { it.result = if (it.result == "win") "loss" else "win" }
-                    items[1] -> chooseOrder(id)
-                    items[2] -> chooseClass("自分のクラス") { c ->
+                val base = if (thumb.exists()) 1 else 0
+                when (if (which >= base && which - base <= 6) which - base else -1) {
+                    -1 -> when (items[which]) {
+                        "開始画面を見る（先攻・後攻の確認）" -> showThumb(id)
+                        "確認済みにする（⚠を外す）" -> Store.update(id) { it.needsCheck = false }
+                        "この記録を削除" -> AlertDialog.Builder(this)
+                            .setMessage("削除しますか？")
+                            .setPositiveButton("削除") { _, _ -> Store.delete(id) }
+                            .setNegativeButton("やめる", null).show()
+                    }
+                    0 -> Store.update(id) { it.result = if (it.result == "win") "loss" else "win" }
+                    1 -> chooseOrder(id)
+                    2 -> chooseClass("自分のクラス") { c ->
                         Store.update(id) { it.myClass = c; recheck(it) }
                         Vision.decode(m.myIcon)?.let { Store.learnIcon(c, it, force = true) }
                     }
-                    items[3] -> chooseClass("相手のクラス") { c ->
+                    3 -> chooseClass("相手のクラス") { c ->
                         Store.update(id) { it.oppClass = c; recheck(it) }
                         Vision.decode(m.oppIcon)?.let { Store.learnIcon(c, it, force = true) }
                     }
-                    items[4] -> inputOppType(id, m.oppType)
-                    items[5] -> inputText("自分のデッキ名", m.deck, "空ならクラス名") { v -> Store.update(id) { it.deck = v } }
-                    items[6] -> inputText("シリーズ", m.series, "SVTのシリーズ名") { v -> Store.update(id) { it.series = v } }
-                    "確認済みにする（⚠を外す）" -> Store.update(id) { it.needsCheck = false }
-                    "この記録を削除" -> AlertDialog.Builder(this)
-                        .setMessage("削除しますか？")
-                        .setPositiveButton("削除") { _, _ -> Store.delete(id) }
-                        .setNegativeButton("やめる", null).show()
+                    4 -> inputOppType(id, m.oppType)
+                    5 -> inputText("自分のデッキ名", m.deck, "空ならクラス名") { v -> Store.update(id) { it.deck = v } }
+                    6 -> inputText("シリーズ", m.series, "SVTのシリーズ名") { v -> Store.update(id) { it.series = v } }
                 }
             }
+            .show()
+    }
+
+    private fun showThumb(id: String) {
+        val bmp = BitmapFactory.decodeFile(Store.thumbFile(id).absolutePath) ?: return
+        val iv = ImageView(this).apply {
+            setImageBitmap(bmp)
+            adjustViewBounds = true
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        val m = Store.snapshot().find { it.id == id }
+        AlertDialog.Builder(this)
+            .setTitle("開始画面（左が自分）")
+            .setView(iv)
+            .setPositiveButton("先攻だった") { _, _ -> Store.update(id) { it.order = "first"; recheck(it) } }
+            .setNegativeButton("後攻だった") { _, _ -> Store.update(id) { it.order = "second"; recheck(it) } }
+            .setNeutralButton("閉じる", null)
+            .setMessage("記録：${Analyzer.orderJa(m?.order)}")
             .show()
     }
 
