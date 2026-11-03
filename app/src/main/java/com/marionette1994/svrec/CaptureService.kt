@@ -301,6 +301,17 @@ class CaptureService : Service() {
                 val box = line.boundingBox ?: continue
                 out.add(Line(line.text, box.exactCenterX() / img.width, box.exactCenterY() / img.height))
             }
+            // 右端の帯（PP+1ボタン・「あなたの手番 先攻/後攻」）は文字が小さいので、2倍に拡大してもう一度読む
+            val x0 = 0.72f
+            val sx = (f.cl + x0 * cw).toInt().coerceIn(0, bmp.width - 2)
+            val sw = (f.cr - sx).coerceAtLeast(1)
+            val strip = Bitmap.createBitmap(bmp, sx, f.ct, sw, ch).also { owned.add(it) }
+            val big = Bitmap.createScaledBitmap(strip, sw * 2, ch * 2, true).also { owned.add(it) }
+            val t2 = Tasks.await(rec.process(InputImage.fromBitmap(big, 0)), 5, TimeUnit.SECONDS)
+            for (block in t2.textBlocks) for (line in block.lines) {
+                val box = line.boundingBox ?: continue
+                out.add(Line(line.text, x0 + (1f - x0) * box.exactCenterX() / big.width, box.exactCenterY() / big.height))
+            }
             return out
         } finally {
             owned.forEach { if (it !== bmp) it.recycle() }

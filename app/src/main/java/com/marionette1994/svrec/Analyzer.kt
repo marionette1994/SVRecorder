@@ -62,6 +62,29 @@ object Analyzer {
             return vsObs(f, g, ocrOrder, lines, if (ocrOrder != null) "VS（文字）" else "VS（先後まだ）")
         }
 
+        // ---- マリガン（手札交換）画面：右下に「あなたの手番 先攻／後攻」と出る ----
+        val corner = lines.filter { it.cx > 0.72f && it.cy > 0.74f }
+        if (corner.isNotEmpty()) {
+            val joined = corner.joinToString("") { it.text.replace(" ", "").replace("　", "") }
+            val hasTurnLabel = joined.contains("手番")
+            val mull = when {
+                joined.contains("後攻") -> "second"
+                joined.contains("先攻") -> "first"
+                hasTurnLabel && joined.contains('後') -> "second"
+                hasTurnLabel && joined.contains('先') -> "first"
+                else -> null
+            }
+            if (mull != null) {
+                val dbg = "マリガン画面 | 「あなたの手番」→ ${orderJa(mull)} | 読取: $joined"
+                return Obs(
+                    Kind.BATTLE,
+                    ppSecond = if (mull == "second") 4 else 0,
+                    ppFirst = if (mull == "first") 4 else 0,
+                    debug = dbg,
+                )
+            }
+        }
+
         // ---- リザルト画面 ----
         val up = lines.map { it.copy(text = it.text.uppercase().replace(" ", "").replace("　", "")) }
         val hits = RESULT_WORDS.count { k -> up.any { it.text.contains(k) } }
