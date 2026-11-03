@@ -30,13 +30,13 @@ class MainActivity : Activity() {
     private val reqCapture = 1
     private val reqExport = 2
 
-    private val bg = Color.parseColor("#14141c")
-    private val card = Color.parseColor("#1f1f2b")
-    private val gold = Color.parseColor("#c9a84c")
-    private val textC = Color.parseColor("#e6e2d6")
-    private val sub = Color.parseColor("#8a8796")
-    private val winC = Color.parseColor("#4caf7a")
-    private val lossC = Color.parseColor("#c0392b")
+    internal val bg = Color.parseColor("#14141c")
+    internal val card = Color.parseColor("#1f1f2b")
+    internal val gold = Color.parseColor("#c9a84c")
+    internal val textC = Color.parseColor("#e6e2d6")
+    internal val sub = Color.parseColor("#8a8796")
+    internal val winC = Color.parseColor("#4caf7a")
+    internal val lossC = Color.parseColor("#c0392b")
 
     private lateinit var statusTv: TextView
     private lateinit var toggleBtn: Button
@@ -44,6 +44,12 @@ class MainActivity : Activity() {
     private lateinit var summaryTv: TextView
     private lateinit var listBox: LinearLayout
     private lateinit var diagTv: TextView
+    private lateinit var recPage: LinearLayout
+    private lateinit var statsPage: LinearLayout
+    private lateinit var tabRec: TextView
+    private lateinit var tabStats: TextView
+    private var showStats = false
+    private val statsState = StatsState()
     private var exportIds: Set<String> = emptySet()
     private var exportCsv = ""
 
@@ -77,9 +83,9 @@ class MainActivity : Activity() {
 
     // ---------- 画面 ----------
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    internal fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun tv(s: String, size: Float = 14f, color: Int = textC, bold: Boolean = false) = TextView(this).apply {
+    internal fun tv(s: String, size: Float = 14f, color: Int = textC, bold: Boolean = false) = TextView(this).apply {
         text = s; textSize = size; setTextColor(color)
         if (bold) typeface = Typeface.DEFAULT_BOLD
     }
@@ -94,7 +100,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
         }
 
-    private fun section(title: String, parent: LinearLayout): LinearLayout {
+    internal fun section(title: String, parent: LinearLayout): LinearLayout {
         parent.addView(tv(title, 12f, sub).apply { setPadding(0, dp(18), 0, dp(6)) })
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -123,12 +129,29 @@ class MainActivity : Activity() {
         root.addView(tv("SV戦績オート", 22f, gold, true))
         root.addView(tv("対戦開始とリザルト画面を自動で読み取って記録します", 12f, sub))
 
-        statusTv = tv("", 14f, textC, true).apply { setPadding(0, dp(14), 0, 0) }
-        root.addView(statusTv)
-        toggleBtn = btn("記録を開始", gold, Color.parseColor("#111111")) { toggle() }
-        root.addView(toggleBtn)
+        // ---- タブ（記録 / 戦績） ----
+        val tabs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(14), 0, 0)
+        }
+        tabRec = tabButton("記録") { showStats = false; refresh() }
+        tabStats = tabButton("戦績") { showStats = true; refresh() }
+        tabs.addView(tabRec, LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(4) })
+        tabs.addView(tabStats, LinearLayout.LayoutParams(0, -2, 1f).apply { leftMargin = dp(4) })
+        root.addView(tabs)
 
-        val set = section("設定（SVTに取り込むときの名前）", root)
+        statsPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(10), 0, 0) }
+        root.addView(statsPage)
+        recPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(recPage)
+        val page = recPage
+
+        statusTv = tv("", 14f, textC, true).apply { setPadding(0, dp(14), 0, 0) }
+        page.addView(statusTv)
+        toggleBtn = btn("記録を開始", gold, Color.parseColor("#111111")) { toggle() }
+        page.addView(toggleBtn)
+
+        val set = section("設定（SVTに取り込むときの名前）", page)
         set.addView(tv("シリーズ名", 11f, sub))
         set.addView(edit("SVTのシリーズ名と同じにする", Store.series) { Store.series = it })
         set.addView(tv("デッキ名", 11f, sub).apply { setPadding(0, dp(8), 0, 0) })
@@ -136,7 +159,7 @@ class MainActivity : Activity() {
         myClassBtn = btn("") { chooseDefaultClass() }
         set.addView(myClassBtn)
 
-        val rec = section("記録", root)
+        val rec = section("記録", page)
         summaryTv = tv("", 13f)
         rec.addView(summaryTv)
         rec.addView(btn("CSVを保存（SVTの「CSV取り込み → 追加」で読み込み）") { startExport() })
@@ -144,7 +167,7 @@ class MainActivity : Activity() {
         listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(8), 0, 0) }
         rec.addView(listBox)
 
-        val diag = section("診断（直近に読み取った内容）", root)
+        val diag = section("診断（直近に読み取った内容）", page)
         diagTv = tv("", 11f, sub).apply { typeface = Typeface.MONOSPACE }
         diag.addView(diagTv)
         diag.addView(tv("クラスの絵を覚えている数：", 11f, sub).apply { id = View.generateViewId(); tag = "icons" })
@@ -155,7 +178,27 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun tabButton(label: String, onClick: () -> Unit) = TextView(this).apply {
+        text = label; textSize = 15f; gravity = Gravity.CENTER
+        setPadding(0, dp(10), 0, dp(10))
+        setOnClickListener { onClick() }
+    }
+
+    private fun styleTab(t: TextView, sel: Boolean) {
+        t.setTextColor(if (sel) Color.parseColor("#111111") else textC)
+        t.typeface = if (sel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        t.background = GradientDrawable().apply {
+            setColor(if (sel) gold else Color.parseColor("#2a2a38")); cornerRadius = dp(10).toFloat()
+        }
+    }
+
     private fun refresh() {
+        styleTab(tabRec, !showStats)
+        styleTab(tabStats, showStats)
+        recPage.visibility = if (showStats) View.GONE else View.VISIBLE
+        statsPage.visibility = if (showStats) View.VISIBLE else View.GONE
+        if (showStats) renderStats(statsPage, Store.snapshot(), statsState) { refresh() }
+
         val running = Store.running
         statusTv.text = if (running) "● 記録中 — シャドバを開いて対戦してください" else "○ 停止中"
         statusTv.setTextColor(if (running) winC else sub)
@@ -270,10 +313,10 @@ class MainActivity : Activity() {
         val rows = list.sortedBy { it.ts }.map { m ->
             listOf(
                 tf.format(Date(m.ts)),
-                Store.series,
+                m.series.ifBlank { Store.series },
                 if (m.result == "win") "勝利" else "敗北",
                 if (m.order == "first") "先攻" else "後攻",
-                Store.deck,
+                m.deck.ifBlank { Store.deck },
                 m.myClass?.let { Classes.name(it) } ?: "",
                 m.oppClass?.let { Classes.name(it) } ?: "",
                 m.oppType,
@@ -292,7 +335,7 @@ class MainActivity : Activity() {
 
     private fun confirmRemoveExported() {
         AlertDialog.Builder(this)
-            .setMessage("書き出し済みの記録をこのアプリから消しますか？（SVT側のデータは消えません）")
+            .setMessage("書き出し済みの記録をこのアプリから消しますか？\n「戦績」タブの集計からも消えます。（SVT側のデータは消えません）")
             .setPositiveButton("消す") { _, _ ->
                 val n = Store.removeExported()
                 Toast.makeText(this, "${n}件を消しました", Toast.LENGTH_SHORT).show()
@@ -311,6 +354,8 @@ class MainActivity : Activity() {
             "自分のクラス：${Classes.name(m.myClass)} → 変更",
             "相手のクラス：${Classes.name(m.oppClass)} → 変更",
             "相手のデッキタイプ：${m.oppType.ifBlank { "未入力" }}",
+            "自分のデッキ名：${m.deckLabel()}",
+            "シリーズ：${m.series.ifBlank { "未設定" }}",
         )
         if (m.needsCheck) items.add("確認済みにする（⚠を外す）")
         items.add("この記録を削除")
@@ -328,6 +373,8 @@ class MainActivity : Activity() {
                         Vision.decode(m.oppIcon)?.let { Store.learnIcon(c, it, force = true) }
                     }
                     items[4] -> inputOppType(id, m.oppType)
+                    items[5] -> inputText("自分のデッキ名", m.deck, "空ならクラス名") { v -> Store.update(id) { it.deck = v } }
+                    items[6] -> inputText("シリーズ", m.series, "SVTのシリーズ名") { v -> Store.update(id) { it.series = v } }
                     "確認済みにする（⚠を外す）" -> Store.update(id) { it.needsCheck = false }
                     "この記録を削除" -> AlertDialog.Builder(this)
                         .setMessage("削除しますか？")
@@ -360,6 +407,13 @@ class MainActivity : Activity() {
             Store.defaultMyClass = if (w < Classes.ids.size) Classes.ids[w] else null
             refresh()
         }.show()
+    }
+
+    private fun inputText(title: String, cur: String, hint: String, save: (String) -> Unit) {
+        val e = EditText(this).apply { setText(cur); this.hint = hint }
+        AlertDialog.Builder(this).setTitle(title).setView(e)
+            .setPositiveButton("保存") { _, _ -> save(e.text.toString().trim()) }
+            .setNegativeButton("やめる", null).show()
     }
 
     private fun inputOppType(id: String, cur: String) {

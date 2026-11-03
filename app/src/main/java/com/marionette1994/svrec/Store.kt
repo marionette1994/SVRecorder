@@ -50,7 +50,12 @@ data class Match(
     var exported: Boolean = false,
     var myIcon: String? = null,
     var oppIcon: String? = null,
+    var series: String = "",
+    var deck: String = "",
 ) {
+    /** 統計・書き出しで使うデッキ名（空ならクラス名。SVTの取り込みと同じ扱い） */
+    fun deckLabel(): String = deck.ifBlank { Classes.name(myClass) }
+
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("ts", ts); put("result", result)
         put("order", order ?: JSONObject.NULL)
@@ -60,6 +65,7 @@ data class Match(
         put("needsCheck", needsCheck); put("exported", exported)
         put("myIcon", myIcon ?: JSONObject.NULL)
         put("oppIcon", oppIcon ?: JSONObject.NULL)
+        put("series", series); put("deck", deck)
     }
 
     companion object {
@@ -79,6 +85,8 @@ data class Match(
             exported = o.optBoolean("exported", false),
             myIcon = o.str("myIcon"),
             oppIcon = o.str("oppIcon"),
+            series = o.optString("series", ""),
+            deck = o.optString("deck", ""),
         )
     }
 }

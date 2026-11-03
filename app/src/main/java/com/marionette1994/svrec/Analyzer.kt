@@ -172,6 +172,8 @@ class Recorder(private val onRecord: (Match) -> Unit) {
             needsCheck = p == null || !o.confident || order == null || my == null || opp == null,
             myIcon = p?.myIcon?.let { Vision.encode(it) },
             oppIcon = p?.oppIcon?.let { Vision.encode(it) },
+            series = Store.series,
+            deck = Store.deck,
         )
         // 文字で分かったクラスのアイコンを覚えて、次から絵だけで判定できるようにする
         if (p != null) {
