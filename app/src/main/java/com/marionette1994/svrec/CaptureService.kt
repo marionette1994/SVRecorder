@@ -240,7 +240,7 @@ class CaptureService : Service() {
             lastOcr = now
             Analyzer.analyze(f, ocr(bmp, f), g)
         } else {
-            Analyzer.fast(f, g)
+            Analyzer.fast(f, g) ?: (if (now - lastBattle > 5000) cornerCheck(bmp, f, now) else null)
         }
         maybeSaveDebug(bmp, f, obsOrNull, g, now)
         val obs = obsOrNull ?: return                       // 何も判定できないフレームは捨てる
@@ -251,12 +251,50 @@ class CaptureService : Service() {
             val th = maxOf(1, h * tw / w)
             rec.setThumb(Bitmap.createScaledBitmap(bmp, tw, th, true), obs.glyphStrength)
         }
+        if (obs.kind == Kind.BATTLE && !obs.mulligan) lastBattle = now
+        val wall = System.currentTimeMillis()
+        if (obs.kind != Kind.NONE || wall - lastNoneLog > 10_000) {
+            if (obs.kind == Kind.NONE) lastNoneLog = wall
+            Store.addLog("${Recorder.hms(wall)} ${obs.debug.replace("\n", " / ")}")
+        }
         val votes = rec.voteText()
         val size = "キャプチャ${w}x${h} ゲーム部分${f.cw.toInt()}x${f.ch.toInt()}"
         Store.setDebug((if (votes.isEmpty()) obs.debug else obs.debug + "\n" + votes) + "\n" + size)
     }
 
     private var lastDebugSave = 0L
+    private var lastNoneLog = 0L
+    private var lastCorner = 0L
+    private var lastBattle = 0L   // 対戦中の画面を最後に見た時刻（対戦中は右下の軽い読取をしない）
+
+    /**
+     * マリガン画面の「あなたの手番 先攻/後攻」は表示が短いことがあるので、
+     * 右下の小さな範囲だけを0.3秒ごとに拡大して読む（全体の文字認識より軽い）
+     */
+    private fun cornerCheck(bmp: Bitmap, f: Frame, now: Long): Obs? {
+        if (now - lastCorner < 300) return null
+        lastCorner = now
+        val rec = recognizer ?: return null
+        val x0 = 0.74f; val y0 = 0.74f; val x1 = 0.97f; val y1 = 0.98f
+        val sx = (f.cl + x0 * f.cw).toInt().coerceIn(0, bmp.width - 2)
+        val sy = (f.ct + y0 * f.ch).toInt().coerceIn(0, bmp.height - 2)
+        val sw = ((x1 - x0) * f.cw).toInt().coerceIn(1, bmp.width - sx)
+        val sh = ((y1 - y0) * f.ch).toInt().coerceIn(1, bmp.height - sy)
+        val crop = Bitmap.createBitmap(bmp, sx, sy, sw, sh)
+        val big = Bitmap.createScaledBitmap(crop, sw * 2, sh * 2, true)
+        try {
+            val t = Tasks.await(rec.process(InputImage.fromBitmap(big, 0)), 3, TimeUnit.SECONDS)
+            val lines = ArrayList<Line>()
+            for (block in t.textBlocks) for (line in block.lines) {
+                val box = line.boundingBox ?: continue
+                lines.add(Line(line.text, x0 + (x1 - x0) * box.exactCenterX() / big.width, y0 + (y1 - y0) * box.exactCenterY() / big.height))
+            }
+            return Analyzer.mulliganOnly(lines)
+        } finally {
+            if (big !== crop) big.recycle()
+            crop.recycle()
+        }
+    }
 
     /** 診断モード中は、アプリが実際に見ている画面を約0.7秒ごとに Pictures/SVRecorder に保存する */
     private fun maybeSaveDebug(bmp: Bitmap, f: Frame, obs: Obs?, g: Vision.GlyphResult, now: Long) {

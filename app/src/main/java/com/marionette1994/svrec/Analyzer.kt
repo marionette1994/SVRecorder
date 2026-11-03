@@ -64,29 +64,7 @@ object Analyzer {
             return vsObs(f, g, ocrOrder, lines, if (ocrOrder != null) "VS（文字）" else "VS（先後まだ）")
         }
 
-        // ---- マリガン（手札交換）画面：右下に「あなたの手番 先攻／後攻」と出る ----
-        val corner = lines.filter { it.cx > 0.72f && it.cy > 0.74f }
-        if (corner.isNotEmpty()) {
-            val joined = corner.joinToString("") { it.text.replace(" ", "").replace("　", "") }
-            val hasTurnLabel = joined.contains("手番")
-            val mull = when {
-                joined.contains("後攻") -> "second"
-                joined.contains("先攻") -> "first"
-                hasTurnLabel && joined.contains('後') -> "second"
-                hasTurnLabel && joined.contains('先') -> "first"
-                else -> null
-            }
-            if (mull != null) {
-                val dbg = "マリガン画面 | 「あなたの手番」→ ${orderJa(mull)} | 読取: $joined"
-                return Obs(
-                    Kind.BATTLE,
-                    ppSecond = if (mull == "second") 4 else 0,
-                    ppFirst = if (mull == "first") 4 else 0,
-                    mulligan = true,
-                    debug = dbg,
-                )
-            }
-        }
+        mulliganOnly(lines)?.let { return it }
 
         // ---- リザルト画面 ----
         val up = lines.map { it.copy(text = it.text.uppercase().replace(" ", "").replace("　", "")) }
@@ -155,6 +133,28 @@ object Analyzer {
         return Obs(Kind.NONE, debug = "—（対象外の画面）| ${g.info} | 明るさ${lum.toInt()} | 読取: $sample")
     }
 
+    /** マリガン（手札交換）画面：右下に「あなたの手番 先攻／後攻」と出る */
+    fun mulliganOnly(lines: List<Line>): Obs? {
+        val corner = lines.filter { it.cx > 0.72f && it.cy > 0.74f }
+        if (corner.isEmpty()) return null
+        val joined = corner.joinToString("") { it.text.replace(" ", "").replace("　", "") }
+        val hasTurnLabel = joined.contains("手番")
+        val mull = when {
+            joined.contains("後攻") -> "second"
+            joined.contains("先攻") -> "first"
+            hasTurnLabel && joined.contains('後') -> "second"
+            hasTurnLabel && joined.contains('先') -> "first"
+            else -> null
+        } ?: return null
+        return Obs(
+            Kind.BATTLE,
+            ppSecond = if (mull == "second") 4 else 0,
+            ppFirst = if (mull == "first") 4 else 0,
+            mulligan = true,
+            debug = "マリガン画面 | 「あなたの手番」→ ${orderJa(mull)} | 読取: $joined",
+        )
+    }
+
     private fun vsObs(f: Frame, g: Vision.GlyphResult, order: String?, lines: List<Line>, label: String): Obs {
         val myVec = Vision.icon(f, Vision.IL, 0)
         val oppVec = Vision.icon(f, Vision.IR, 0)
@@ -198,6 +198,16 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
         var oppName = ""
         var thumb: Bitmap? = null
         var thumbStrength = 0f
+        val log = ArrayList<String>()     // この試合で見た画面の判定（時刻つき）
+        private var lastLogged = ""
+
+        fun log(now: Long, text: String) {
+            val t = text.replace("\n", " / ")
+            if (t == lastLogged) return       // 同じ内容が続くときは1回だけ
+            lastLogged = t
+            if (log.size >= 80) log.removeAt(10)  // 最初の方（VS画面）は残しつつ古いものを間引く
+            log.add("${Recorder.hms(now)} $t")
+        }
         var ppSecond = 0      // 対戦中の後攻の証拠（重み付き）
         var ppFirst = 0       // 対戦中の先攻の証拠（重み付き）
         var battleFrames = 0
@@ -258,10 +268,20 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
     private var hold: Obs? = null        // 勝敗に自信がないとき、少し待つ
     private var holdSince = 0L
 
+    companion object {
+        private val fmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.JAPAN)
+        fun hms(t: Long): String = synchronized(fmt) { fmt.format(java.util.Date(t)) }
+    }
+
     /** いま集計中の試合の先後の票（診断表示用） */
     fun voteText(): String = pending?.voteText() ?: ""
 
     fun feed(o: Obs, now: Long) {
+        feedInner(o, now)
+        if (o.kind == Kind.VS || o.kind == Kind.BATTLE) pending?.log(now, o.debug)
+    }
+
+    private fun feedInner(o: Obs, now: Long) {
         when (o.kind) {
             Kind.VS -> {
                 hold?.let { commit(it, now) }
@@ -327,8 +347,19 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             oppIcon = p?.oppIcon?.let { Vision.encode(it) },
             series = Store.series,
             deck = Store.deck,
-            evidence = (p?.voteText() ?: "VS画面も対戦中も確認できず") +
-                " → ${Analyzer.orderJa(order)}${if (orderSure) "（確定）" else "（要確認）"}",
+            evidence = buildString {
+                append("【先後】${Analyzer.orderJa(order)}${if (orderSure) "（確定）" else "（要確認）"}\n")
+                append(p?.voteText() ?: "VS画面も対戦中も確認できず")
+                fun votes(m: Map<String, Int>?) = m?.entries?.sortedByDescending { it.value }
+                    ?.joinToString(" ") { "${Classes.name(it.key)}${it.value}" }?.ifEmpty { "なし" } ?: "なし"
+                append("\n【クラス】自分:${votes(p?.my)} 相手:${votes(p?.opp)}（アイコン一致は2票・文字は1票）")
+                append("\n【勝敗】${o.debug}")
+                if (p != null && p.log.isNotEmpty()) {
+                    append("\n\n【この試合で見た画面】\n")
+                    append(p.log.joinToString("\n"))
+                }
+                append("\n${hms(now)} ${o.debug}")
+            },
         )
         // 文字で分かったクラスのアイコンを覚えて、次から絵だけで判定できるようにする
         if (p != null) {

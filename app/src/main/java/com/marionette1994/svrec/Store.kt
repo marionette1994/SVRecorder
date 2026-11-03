@@ -188,6 +188,22 @@ object Store {
     }
 
     fun setRunning(v: Boolean) { running = v; changed() }
+
+    // ---------- 判定ログ（直近300件） ----------
+    private val logLines = ArrayDeque<String>()
+    private var lastLog = ""
+
+    fun addLog(line: String) {
+        synchronized(logLines) {
+            val body = line.substringAfter(' ')
+            if (body == lastLog) return
+            lastLog = body
+            logLines.addLast(line)
+            while (logLines.size > 300) logLines.removeFirst()
+        }
+    }
+
+    fun logText(): String = synchronized(logLines) { logLines.joinToString("\n") }
     fun setDebug(s: String) {
         debug = s
         main.post { debugListener?.invoke(s) }

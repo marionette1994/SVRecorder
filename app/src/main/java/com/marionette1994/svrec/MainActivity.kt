@@ -174,6 +174,9 @@ class MainActivity : Activity() {
         val diag = section("診断（直近に読み取った内容）", page)
         diagTv = tv("", 11f, sub).apply { typeface = Typeface.MONOSPACE }
         diag.addView(diagTv)
+        diag.addView(btn("判定ログを見る（直近300件・共有できます）") {
+            showText("判定ログ", Store.logText().ifEmpty { "（まだ記録を開始していません）" })
+        })
         diag.addView(btn("診断用に90秒間、画面を保存する") {
             if (!Store.running) {
                 Toast.makeText(this, "先に「記録を開始」してください", Toast.LENGTH_SHORT).show()
@@ -394,15 +397,17 @@ class MainActivity : Activity() {
         )
         val thumb = Store.thumbFile(m.id)
         if (thumb.exists()) items.add(0, "開始画面を見る（先攻・後攻の確認）")
+        if (m.evidence.isNotBlank()) items.add(0, "判定の詳細を見る")
         if (m.needsCheck) items.add("確認済みにする（⚠を外す）")
         items.add("この記録を削除")
         AlertDialog.Builder(this)
-            .setTitle(if (m.evidence.isNotBlank()) "判定の根拠：${m.evidence}" else null)
+            .setTitle(if (m.evidence.isNotBlank()) m.evidence.lineSequence().first() else null)
             .setItems(items.toTypedArray()) { _, which ->
-                val base = if (thumb.exists()) 1 else 0
+                val base = (if (thumb.exists()) 1 else 0) + (if (m.evidence.isNotBlank()) 1 else 0)
                 when (if (which >= base && which - base <= 6) which - base else -1) {
                     -1 -> when (items[which]) {
                         "開始画面を見る（先攻・後攻の確認）" -> showThumb(id)
+                        "判定の詳細を見る" -> showText("判定の詳細", m.evidence)
                         "確認済みにする（⚠を外す）" -> Store.update(id) { it.needsCheck = false }
                         "この記録を削除" -> AlertDialog.Builder(this)
                             .setMessage("削除しますか？")
@@ -423,6 +428,23 @@ class MainActivity : Activity() {
                     5 -> inputText("自分のデッキ名", m.deck, "空ならクラス名") { v -> Store.update(id) { it.deck = v } }
                     6 -> inputText("シリーズ", m.series, "SVTのシリーズ名") { v -> Store.update(id) { it.series = v } }
                 }
+            }
+            .show()
+    }
+
+    /** 長い文章をスクロールで表示し、LINEやメール等へ共有もできる */
+    private fun showText(title: String, body: String) {
+        val t = TextView(this).apply {
+            text = body; textSize = 11f; typeface = Typeface.MONOSPACE
+            setTextIsSelectable(true)
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+        }
+        val sv = ScrollView(this).apply { addView(t) }
+        AlertDialog.Builder(this).setTitle(title).setView(sv)
+            .setPositiveButton("閉じる", null)
+            .setNeutralButton("共有") { _, _ ->
+                val i = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "【$title】\n$body")
+                startActivity(Intent.createChooser(i, "共有"))
             }
             .show()
     }
