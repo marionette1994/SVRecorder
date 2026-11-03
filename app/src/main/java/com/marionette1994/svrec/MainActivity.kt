@@ -364,6 +364,7 @@ class MainActivity : Activity() {
         if (m.needsCheck) items.add("確認済みにする（⚠を外す）")
         items.add("この記録を削除")
         AlertDialog.Builder(this)
+            .setTitle(if (m.evidence.isNotBlank()) "判定の根拠：${m.evidence}" else null)
             .setItems(items.toTypedArray()) { _, which ->
                 val base = if (thumb.exists()) 1 else 0
                 when (if (which >= base && which - base <= 6) which - base else -1) {

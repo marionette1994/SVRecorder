@@ -22,8 +22,8 @@ class Obs(
     val outcome: String? = null,
     val confident: Boolean = false,
     val debug: String = "",
-    val extraPP: Boolean? = null,   // BATTLE: true=自分にエクストラPPあり（後攻）/ false=無し（先攻）/ null=判断できず
-    val extraByText: Boolean = false, // 「PP+1」の文字まで読めた（色だけより確か）
+    val ppSecond: Int = 0,   // BATTLE: 後攻の証拠の重み（自分側にPP+1の文字=3、色だけ=1）
+    val ppFirst: Int = 0,    // BATTLE: 先攻の証拠の重み（相手側にPP+1の文字=3、どこにも無い=1）
 )
 
 object Analyzer {
@@ -87,25 +87,40 @@ object Analyzer {
             return Obs(Kind.RESULT, outcome = outcome, confident = confident, debug = dbg)
         }
 
-        // ---- 対戦中：後攻だけに出る柿色の「PP+1」ボタンで先後を見る ----
-        val inBattle = lines.any { it.cx in 0.76f..0.92f && it.cy in 0.52f..0.68f && it.text.uppercase().contains("PP") } ||
-            lines.any { it.cx in 0.76f..0.92f && it.cy in 0.3f..0.55f && it.text.contains("ターン") }
+        // ---- 対戦中：後攻の側にだけ「PP+1」ボタンが出る ----
+        // 自分が後攻 → 右下（自分のPP欄の下）、自分が先攻 → 右上（相手のPP欄の上）に出る。
+        // 文字の位置で判定するので、ステージの背景色に左右されない。
+        fun isPpBtn(t0: String): Boolean {
+            val t = t0.uppercase().replace(" ", "")
+            return t.contains("PP+1") || t.contains("PP十1") || t.contains("PP＋1") || t.contains("PP+I") ||
+                t.contains("再使用") || t.contains("ターン後に")
+        }
+        val inBattle = lines.any { it.cx in 0.76f..0.92f && it.text.uppercase().replace(" ", "").startsWith("PP") && !isPpBtn(it.text) } ||
+            lines.any { it.cx in 0.76f..0.92f && it.cy in 0.3f..0.55f &&
+                (it.text.contains("ターン") || it.text.uppercase().contains("TURN")) }
         if (inBattle) {
+            val mineText = lines.any { it.cx in 0.74f..0.94f && it.cy in 0.64f..0.82f && isPpBtn(it.text) }
+            val oppText = lines.any { it.cx in 0.74f..0.94f && it.cy in 0.08f..0.3f && isPpBtn(it.text) }
             val orange = Vision.orangeFrac(f)
-            val btnText = lines.any { l ->
-                val t = l.text.uppercase().replace(" ", "")
-                l.cx in 0.76f..0.93f && l.cy in 0.65f..0.8f &&
-                    (t.contains("PP+1") || t.contains("PP十1") || t.contains("PP＋1") || t.contains("再使用"))
+            val second = when {
+                mineText && !oppText -> 3
+                !oppText && orange >= 0.45f -> 1
+                else -> 0
             }
-            val extra: Boolean? = when {
-                btnText -> true
-                orange >= 0.45f -> true
-                orange < 0.08f -> false
-                else -> null
+            val first = when {
+                oppText && !mineText -> 3
+                !mineText && orange < 0.08f -> 1
+                else -> 0
             }
-            val dbg = "対戦中 | エクストラPP:${when (extra) { true -> "あり→後攻"; false -> "なし→先攻"; null -> "不明" }}" +
-                " | 柿色${(orange * 100).toInt()}% 文字:$btnText"
-            return Obs(Kind.BATTLE, extraPP = extra, extraByText = btnText, debug = dbg)
+            val verdict = when {
+                second >= 3 -> "自分側にPP+1→後攻"
+                first >= 3 -> "相手側にPP+1→先攻"
+                second > 0 -> "色だけ→後攻？"
+                first > 0 -> "見当たらず→先攻？"
+                else -> "不明"
+            }
+            val dbg = "対戦中 | $verdict | 自分側文字:$mineText 相手側文字:$oppText 柿色${(orange * 100).toInt()}%"
+            return Obs(Kind.BATTLE, ppSecond = second, ppFirst = first, debug = dbg)
         }
 
         val sample = lines.take(6).joinToString(" / ") { it.text }
@@ -155,9 +170,10 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
         var oppName = ""
         var thumb: Bitmap? = null
         var thumbStrength = 0f
-        var extraYes = 0      // 対戦中に自分側のPP+1ボタンを見た回数（後攻の証拠）
-        var extraNo = 0       // 対戦中なのにボタンが無かった回数（先攻の証拠）
-        val hasBattle get() = extraYes + extraNo > 0
+        var ppSecond = 0      // 対戦中の後攻の証拠（重み付き）
+        var ppFirst = 0       // 対戦中の先攻の証拠（重み付き）
+        var battleFrames = 0
+        val hasBattle get() = battleFrames > 0
 
         fun add(o: Obs, now: Long) {
             lastSeen = now
@@ -172,14 +188,14 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             if (!o.oppName.isNullOrBlank()) oppName = o.oppName
         }
 
-        /** エクストラPPから見た先後（十分な証拠がなければ null） */
-        fun extraOrder(): String? = when {
-            extraYes >= 3 && extraYes * 2 >= extraNo -> "second"
-            extraNo >= 6 && extraYes == 0 -> "first"
-            else -> null
+        /** PP+1ボタンの位置から見た先後と、それが確実か */
+        fun ppOrder(): Pair<String?, Boolean> = when {
+            ppSecond >= 3 && ppSecond >= ppFirst * 2 -> Pair("second", ppSecond >= 6)
+            ppFirst >= 3 && ppFirst >= ppSecond * 2 -> Pair("first", ppFirst >= 6)
+            else -> Pair(null, false)
         }
 
-        /** 先後の結論と、それに自信があるか（VS画面の照合 と 対戦中のエクストラPP の2つで確かめる） */
+        /** 先後の結論と、それに自信があるか（対戦中のPP+1ボタン を主、VS画面の照合 を従に使う） */
         fun decideOrder(): Pair<String?, Boolean> {
             var vs: String? = null
             var vsSure = false
@@ -191,12 +207,12 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             } else {
                 vs = ocrOrder.maxByOrNull { it.value }?.key
             }
-            val ex = extraOrder()
+            val (pp, ppSure) = ppOrder()
             return when {
-                ex != null && vs != null && ex == vs -> Pair(vs, true)          // 2つが一致 → 確定
-                // 食い違い → 「PP+1」の文字が何度も読めていればそちらを、そうでなければVS画面を採用して要確認
-                ex != null && vs != null -> Pair(if (ex == "second" && extraYes >= 4) ex else vs, false)
-                ex != null -> Pair(ex, extraYes >= 4 || extraNo >= 10)          // VS画面を取り逃した
+                pp != null && vs != null && pp == vs -> Pair(pp, true)       // 2つが一致 → 確定
+                pp != null && ppSure -> Pair(pp, vs == null)                // PP+1の文字を何度も確認 → こちらを採用（VSと食い違えば要確認）
+                pp != null && vs != null -> Pair(if (vsSure) vs else pp, false)
+                pp != null -> Pair(pp, false)
                 else -> Pair(vs, vsSure)
             }
         }
@@ -204,7 +220,7 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
         fun voteText(): String {
             val gf = glyphOrder["first"] ?: 0; val gs = glyphOrder["second"] ?: 0
             val of = ocrOrder["first"] ?: 0; val os = ocrOrder["second"] ?: 0
-            return "先後の票 画像:先$gf/後$gs 文字:先$of/後$os PP+1:あり$extraYes/なし$extraNo"
+            return "VS画像 先$gf/後$gs・VS文字 先$of/後$os・PP+1 先攻の証拠$ppFirst/後攻の証拠$ppSecond（${battleFrames}回確認）"
         }
     }
 
@@ -240,11 +256,9 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
                 latched = false                       // 対戦中＝前のリザルトは終わっている
                 val p = pending ?: Pending(now).also { pending = it }
                 p.lastSeen = now
-                when (o.extraPP) {
-                    true -> p.extraYes += if (o.extraByText) 2 else 1
-                    false -> p.extraNo++
-                    null -> {}
-                }
+                p.battleFrames++
+                p.ppSecond += o.ppSecond
+                p.ppFirst += o.ppFirst
             }
             Kind.NONE -> {
                 hold?.let { commit(it, now) }
@@ -281,6 +295,8 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             oppIcon = p?.oppIcon?.let { Vision.encode(it) },
             series = Store.series,
             deck = Store.deck,
+            evidence = (p?.voteText() ?: "VS画面も対戦中も確認できず") +
+                " → ${Analyzer.orderJa(order)}${if (orderSure) "（確定）" else "（要確認）"}",
         )
         // 文字で分かったクラスのアイコンを覚えて、次から絵だけで判定できるようにする
         if (p != null) {

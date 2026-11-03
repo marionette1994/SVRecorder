@@ -52,6 +52,7 @@ data class Match(
     var oppIcon: String? = null,
     var series: String = "",
     var deck: String = "",
+    var evidence: String = "",   // 先後をどう判定したか（診断用）
 ) {
     /** 統計・書き出しで使うデッキ名（空ならクラス名。SVTの取り込みと同じ扱い） */
     fun deckLabel(): String = deck.ifBlank { Classes.name(myClass) }
@@ -65,7 +66,7 @@ data class Match(
         put("needsCheck", needsCheck); put("exported", exported)
         put("myIcon", myIcon ?: JSONObject.NULL)
         put("oppIcon", oppIcon ?: JSONObject.NULL)
-        put("series", series); put("deck", deck)
+        put("series", series); put("deck", deck); put("evidence", evidence)
     }
 
     companion object {
@@ -87,6 +88,7 @@ data class Match(
             oppIcon = o.str("oppIcon"),
             series = o.optString("series", ""),
             deck = o.optString("deck", ""),
+            evidence = o.optString("evidence", ""),
         )
     }
 }
