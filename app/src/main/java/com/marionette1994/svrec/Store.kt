@@ -220,6 +220,7 @@ object Store {
     fun update(id: String, f: (Match) -> Unit) {
         synchronized(this) {
             matches.find { it.id == id }?.let(f)
+            matches.sortByDescending { it.ts }
             saveMatches()
         }
         changed()

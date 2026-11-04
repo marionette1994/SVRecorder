@@ -166,6 +166,7 @@ class MainActivity : Activity() {
         val rec = section("記録", page)
         summaryTv = tv("", 13f)
         rec.addView(summaryTv)
+        rec.addView(btn("＋ 手動で記録を追加", gold, Color.parseColor("#111111")) { manualAdd() })
         rec.addView(btn("CSVを保存（SVTの「CSV取り込み → 追加」で読み込み）") { startExport() })
         rec.addView(btn("書き出し済みの記録を消す") { confirmRemoveExported() })
         listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(8), 0, 0) }
@@ -394,6 +395,7 @@ class MainActivity : Activity() {
             "相手のデッキタイプ：${m.oppType.ifBlank { "未入力" }}",
             "自分のデッキ名：${m.deckLabel()}",
             "シリーズ：${m.series.ifBlank { "未設定" }}",
+            "日時：${SimpleDateFormat("M/d HH:mm", Locale.JAPAN).format(Date(m.ts))} → 変更",
         )
         val thumb = Store.thumbFile(m.id)
         if (thumb.exists()) items.add(0, "開始画面を見る（先攻・後攻の確認）")
@@ -404,7 +406,7 @@ class MainActivity : Activity() {
             .setTitle(if (m.evidence.isNotBlank()) m.evidence.lineSequence().first() else null)
             .setItems(items.toTypedArray()) { _, which ->
                 val base = (if (thumb.exists()) 1 else 0) + (if (m.evidence.isNotBlank()) 1 else 0)
-                when (if (which >= base && which - base <= 6) which - base else -1) {
+                when (if (which >= base && which - base <= 7) which - base else -1) {
                     -1 -> when (items[which]) {
                         "開始画面を見る（先攻・後攻の確認）" -> showThumb(id)
                         "判定の詳細を見る" -> showText("判定の詳細", m.evidence)
@@ -427,6 +429,7 @@ class MainActivity : Activity() {
                     4 -> chooseOppType(m)
                     5 -> inputText("自分のデッキ名", m.deck, "空ならクラス名") { v -> Store.update(id) { it.deck = v } }
                     6 -> inputText("シリーズ", m.series, "SVTのシリーズ名") { v -> Store.update(id) { it.series = v } }
+                    7 -> changeTime(m)
                 }
             }
             .show()
@@ -467,6 +470,16 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun changeTime(m: Match) {
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = m.ts }
+        android.app.DatePickerDialog(this, { _, y, mo, d ->
+            android.app.TimePickerDialog(this, { _, hh, mm ->
+                c.set(y, mo, d, hh, mm, 0)
+                Store.update(m.id) { it.ts = c.timeInMillis }
+            }, c.get(java.util.Calendar.HOUR_OF_DAY), c.get(java.util.Calendar.MINUTE), true).show()
+        }, c.get(java.util.Calendar.YEAR), c.get(java.util.Calendar.MONTH), c.get(java.util.Calendar.DAY_OF_MONTH)).show()
+    }
+
     private fun recheck(m: Match) {
         m.needsCheck = m.order == null || m.myClass == null || m.oppClass == null
     }
@@ -496,6 +509,40 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this).setTitle(title).setView(e)
             .setPositiveButton("保存") { _, _ -> save(e.text.toString().trim()) }
             .setNegativeButton("やめる", null).show()
+    }
+
+    /** 自動で記録できなかった試合を手で追加する：勝敗 → 先後 → 自分のクラス → 相手のクラス → 相手のデッキタイプ */
+    private fun manualAdd() {
+        val names = Classes.ids.map { Classes.name(it) }.toTypedArray()
+        val lastMy = Store.snapshot().firstOrNull { it.myClass != null }?.myClass ?: Store.defaultMyClass
+        val myOrder = (listOfNotNull(lastMy) + Classes.ids.filter { it != lastMy })
+        AlertDialog.Builder(this).setTitle("手動で記録（1/4）勝敗")
+            .setItems(arrayOf("勝利", "敗北")) { _, r ->
+                val result = if (r == 0) "win" else "loss"
+                AlertDialog.Builder(this).setTitle("手動で記録（2/4）先攻・後攻")
+                    .setItems(arrayOf("先攻", "後攻")) { _, o ->
+                        val order = if (o == 0) "first" else "second"
+                        AlertDialog.Builder(this).setTitle("手動で記録（3/4）自分のクラス")
+                            .setItems(myOrder.map { Classes.name(it) }.toTypedArray()) { _, mi ->
+                                val my = myOrder[mi]
+                                AlertDialog.Builder(this).setTitle("手動で記録（4/4）相手のクラス")
+                                    .setItems(names) { _, oi ->
+                                        val opp = Classes.ids[oi]
+                                        val now = System.currentTimeMillis()
+                                        val m = Match(
+                                            id = "h$now", ts = now, result = result, order = order,
+                                            myClass = my, oppClass = opp,
+                                            series = Store.series, deck = Store.deck,
+                                            evidence = "【手動入力】${Recorder.hms(now)}",
+                                        )
+                                        Store.addMatch(m)
+                                        Toast.makeText(this, "記録しました：${if (result == "win") "勝利" else "敗北"} " +
+                                            "${Analyzer.orderJa(order)} ${Classes.name(my)} vs ${Classes.name(opp)}", Toast.LENGTH_SHORT).show()
+                                        chooseOppType(m)   // 続けてデッキタイプ（不要なら閉じる）
+                                    }.setNegativeButton("やめる", null).show()
+                            }.setNegativeButton("やめる", null).show()
+                    }.setNegativeButton("やめる", null).show()
+            }.setNegativeButton("やめる", null).show()
     }
 
     /** 相手のデッキタイプを選択式で。候補はそのクラスで過去に使った名前（多い順） */
