@@ -111,7 +111,16 @@ class CaptureService : Service() {
             override fun onCapturedContentResize(width: Int, height: Int) {
                 h.post {
                     contentSizeMode = true
+                    log("映す範囲のサイズ変更の通知: ${width}x$height")
                     safeResize(width, height, true)
+                }
+            }
+
+            // Android 14〜：共有中のアプリが隠れた／また見えるようになった
+            override fun onCapturedContentVisibilityChanged(isVisible: Boolean) {
+                h.post {
+                    log(if (isVisible) "共有中の画面がまた見えるようになった" else "共有中の画面が隠れた（別アプリ・画面オフ等）")
+                    if (isVisible) recover("画面が戻ったため")
                 }
             }
         }, h)
@@ -196,6 +205,29 @@ class CaptureService : Service() {
         }
     }
 
+    private fun log(msg: String) {
+        Store.addLog("${Recorder.hms(System.currentTimeMillis())} ◆$msg")
+    }
+
+    private var lastRecover = 0L
+    private var badSince = 0L          // 映像が崩れた（ゲーム部分が小さい）状態が始まった時刻
+    private var wasBlack = false
+    private var lastAreaKey = ""
+    private var autoShots = 0
+    private var recoverTries = 0
+
+    /** キャプチャの受け皿を作り直して、映像の崩れを直す */
+    private fun recover(why: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastRecover < 8000) return
+        lastRecover = now
+        val (dw, dh) = displaySize()
+        capW = 0; capH = 0                       // 同じサイズでも必ず作り直す
+        contentSizeMode = false
+        safeResize(dw, dh)
+        log("キャプチャを作り直しました（$why）→ ${capW}x$capH")
+    }
+
     private fun tick() {
         val now = SystemClock.elapsedRealtime()
         val r = reader ?: return
@@ -227,9 +259,37 @@ class CaptureService : Service() {
         val px = pxBuf
         bmp.getPixels(px, 0, w, 0, 0, w, h)
         val f = Frame(px, w, h)
-        if (f.cw < w * 0.25f || f.ch < h * 0.25f) return   // ほぼ真っ黒（画面オフなど）
+        val now0 = SystemClock.elapsedRealtime()
+        if (f.allBlack) {                                   // 真っ黒（画面オフ・別アプリなど）
+            if (!wasBlack) log("画面が真っ黒になった（画面オフ・別アプリなど）")
+            wasBlack = true
+            return
+        }
+        if (wasBlack) {                                     // 黒い画面から戻った → 念のため作り直す
+            wasBlack = false
+            log("画面が戻った")
+            recover("黒い画面から戻ったため")
+        }
+        // 映像が全面に映っているか／縮んでいるかが切り替わったら記録しておく
+        val areaKey = if (f.full) "full ${w}x$h" else "part"
+        if (areaKey != lastAreaKey) {
+            lastAreaKey = areaKey
+            log(if (f.full) "映像は正常（${w}x$h の全面）"
+                else "映像が縮んでいる／ずれている：${w}x$h のうちゲーム部分 ${f.cw.toInt()}x${f.ch.toInt()}（位置 ${f.cl},${f.ct}）")
+        }
+        // 映像が縮んだ・ずれた状態が2秒続いたら、受け皿を作り直す（暗い画面で繰り返さないよう3回まで）
+        if (!f.full) {
+            if (badSince == 0L) badSince = now0
+            if (now0 - badSince > 2000 && recoverTries < 3) {
+                if (autoShots < 3 && f.cw >= w * 0.3f && f.ch >= h * 0.3f) { autoShots++; saveShot(bmp, "auto_zure") }
+                recoverTries++
+                recover("映像がずれていたため")
+                badSince = now0
+            }
+        } else { badSince = 0L; recoverTries = 0 }
+        if (f.cw < w * 0.2f || f.ch < h * 0.2f) return     // 小さすぎて読めない
         if (f.cw < f.ch) {                                  // 縦画面＝シャドバの対戦画面ではない
-            Store.setDebug("縦画面のため待機中")
+            Store.setDebug("縦向きの映像のため待機中（${f.cw.toInt()}x${f.ch.toInt()}）")
             return
         }
         val rec = recorder ?: return
@@ -297,6 +357,22 @@ class CaptureService : Service() {
     }
 
     /** 診断モード中は、アプリが実際に見ている画面を約0.7秒ごとに Pictures/SVRecorder に保存する */
+    /** 調査用に今の映像を Pictures/SVRecorder に保存する */
+    private fun saveShot(bmp: Bitmap, tag: String) {
+        try {
+            val t = java.text.SimpleDateFormat("HHmmss", java.util.Locale.JAPAN).format(java.util.Date())
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "svrec_${t}_$tag.jpg")
+                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SVRecorder")
+            }
+            val uri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return
+            contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 80, it) }
+            log("調査用に画像を保存: svrec_${t}_$tag.jpg")
+        } catch (_: Exception) {
+        }
+    }
+
     private fun maybeSaveDebug(bmp: Bitmap, f: Frame, obs: Obs?, g: Vision.GlyphResult, now: Long) {
         if (System.currentTimeMillis() > Store.debugCaptureUntil) return
         if (now - lastDebugSave < 700) return

@@ -8,36 +8,52 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /** キャプチャした1フレーム（ARGBピクセル）。上下左右の真っ黒な帯は除いた範囲を「ゲーム画面」とする */
+/** キャプチャした1フレーム（ARGBピクセル）。真っ黒な部分を除いた範囲を「ゲーム画面」とする */
 class Frame(val px: IntArray, val w: Int, val h: Int) {
     var cl = 0; var ct = 0; var cr = w; var cb = h
+    /** 全体が真っ黒（画面オフ・共有中のアプリが隠れている等） */
+    val allBlack: Boolean
 
     init {
         fun lum(c: Int) = ((c shr 16 and 255) * 299 + (c shr 8 and 255) * 587 + (c and 255) * 114) / 1000
-        fun colBlack(x: Int): Boolean {
-            for (k in 1..9) if (lum(px[min(h - 1, h * k / 10) * w + x]) > 4) return false
-            return true
-        }
-        fun rowBlack(y: Int): Boolean {
-            for (k in 1..9) if (lum(px[y * w + min(w - 1, w * k / 10)]) > 4) return false
-            return true
-        }
-        // 黒い帯は、映像が中央に縮んで映ったときに四方に大きく出ることがあるので、半分手前まで探す
-        var x = 0
-        while (x < w * 9 / 20 && colBlack(x)) x++
-        cl = x
-        x = w - 1
-        while (x > w * 11 / 20 && colBlack(x)) x--
-        cr = x + 1
+        // 縦横それぞれ約200マスの格子で、黒くない点がある列・行を数える（映像がどこに縮んで映っても見つかる）
+        val sx = maxOf(1, w / 200)
+        val sy = maxOf(1, h / 120)
+        val nx = (w + sx - 1) / sx
+        val ny = (h + sy - 1) / sy
+        val colHit = IntArray(nx)
+        val rowHit = IntArray(ny)
+        var j = 0
         var y = 0
-        while (y < h * 9 / 20 && rowBlack(y)) y++
-        ct = y
-        y = h - 1
-        while (y > h * 11 / 20 && rowBlack(y)) y--
-        cb = y + 1
+        while (y < h) {
+            var i = 0
+            var x = 0
+            val row = y * w
+            while (x < w) {
+                if (lum(px[row + x]) > 8) { colHit[i]++; rowHit[j]++ }
+                i++; x += sx
+            }
+            j++; y += sy
+        }
+        val minCol = maxOf(2, ny / 30)
+        val minRow = maxOf(2, nx / 30)
+        val c0 = colHit.indexOfFirst { it >= minCol }
+        val c1 = colHit.indexOfLast { it >= minCol }
+        val r0 = rowHit.indexOfFirst { it >= minRow }
+        val r1 = rowHit.indexOfLast { it >= minRow }
+        allBlack = c0 < 0 || r0 < 0
+        if (!allBlack) {
+            cl = c0 * sx; cr = min(w, (c1 + 1) * sx)
+            ct = r0 * sy; cb = min(h, (r1 + 1) * sy)
+            // ほぼ全面に映っているときは、端の暗い部分で範囲が揺れないよう全体を使う
+            if (cr - cl >= w * 0.9f && cb - ct >= h * 0.9f) { cl = 0; ct = 0; cr = w; cb = h }
+        }
     }
 
     val cw get() = (cr - cl).toFloat()
     val ch get() = (cb - ct).toFloat()
+    /** ゲーム部分がキャプチャのほぼ全体を占めているか（正常な状態） */
+    val full get() = cw >= w * 0.9f && ch >= h * 0.9f
 }
 
 object Vision {

@@ -29,7 +29,7 @@ class Obs(
 
 object Analyzer {
     private val RESULT_WORDS = listOf("TOTAL", "再戦", "ボーナス", "累積", "NEXT", "MASTER", "ランク")
-    private val STRONG_WORDS = listOf("TOTAL", "再戦", "ボーナス")
+    private val STRONG_WORDS = listOf("TOTAL", "再戦", "ボーナス", "連勝中", "連敗中")
 
     /**
      * OCRなしの高速判定（0.2秒ごと）。カードが出揃ったVS画面なら先後とアイコンを返す。
