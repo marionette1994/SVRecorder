@@ -211,6 +211,9 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
         var ppSecond = 0      // 対戦中の後攻の証拠（重み付き）
         var ppFirst = 0       // 対戦中の先攻の証拠（重み付き）
         var battleFrames = 0
+        var playFrames = 0    // マリガン以外の対戦中の画面を見た回数
+        var mullFirst = 0     // マリガン画面「あなたの手番 先攻」を読んだ回数（いちばん確かな根拠）
+        var mullSecond = 0
         val hasBattle get() = battleFrames > 0
 
         fun add(o: Obs, now: Long) {
@@ -245,6 +248,13 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             } else {
                 vs = ocrOrder.maxByOrNull { it.value }?.key
             }
+            // マリガン画面の「あなたの手番」がはっきり読めていれば、それを最優先にする
+            val mull = when {
+                mullSecond >= 2 && mullFirst == 0 -> "second"
+                mullFirst >= 2 && mullSecond == 0 -> "first"
+                else -> null
+            }
+            if (mull != null) return Pair(mull, vs == null || vs == mull || !vsSure)
             val (pp, ppSure) = ppOrder()
             return when {
                 pp != null && vs != null && pp == vs -> Pair(pp, true)       // 2つが一致 → 確定
@@ -258,7 +268,7 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
         fun voteText(): String {
             val gf = glyphOrder["first"] ?: 0; val gs = glyphOrder["second"] ?: 0
             val of = ocrOrder["first"] ?: 0; val os = ocrOrder["second"] ?: 0
-            return "VS画像 先$gf/後$gs・VS文字 先$of/後$os・PP+1 先攻の証拠$ppFirst/後攻の証拠$ppSecond（${battleFrames}回確認）"
+            return "マリガン 先$mullFirst/後$mullSecond・VS画像 先$gf/後$gs・VS文字 先$of/後$os・対戦中 先攻の証拠$ppFirst/後攻の証拠$ppSecond（${battleFrames}回確認）"
         }
     }
 
@@ -286,9 +296,14 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
             Kind.VS -> {
                 hold?.let { commit(it, now) }
                 latched = false
-                // VS画面は数秒で終わる。15秒以上あいたら、または対戦が始まった後なら別の試合として数え直す
-                val p = pending?.takeIf { now - it.lastSeen < 15_000 && !it.hasBattle }
-                    ?: Pending(now).also { pending?.thumb?.recycle(); pending = it }
+                // 対戦中に「VS画面らしきもの」（決着の演出など）が出ても、集計中の試合は捨てない。
+                // 試合の区切りはリザルト画面で付くので、新しい試合として数え直すのは
+                //  ・まだ対戦を見ていない試合で15秒以上あいたとき
+                //  ・対戦を見た試合で5分以上なにも見ていないとき（途中で抜けた等）だけ
+                val cur = pending
+                val stale = cur != null && now - cur.lastSeen > (if (cur.hasBattle) 300_000 else 15_000)
+                val p = if (cur == null || stale) Pending(now).also { cur?.thumb?.recycle(); pending = it } else cur
+                if (p.hasBattle && !o.orderByGlyph) { p.lastSeen = now; return }   // 対戦中の誤検出は票に入れない
                 p.add(o, now)
             }
             Kind.RESULT -> {
@@ -306,11 +321,18 @@ class Recorder(private val onRecord: (Match, Bitmap?) -> Unit) {
                 // 記録した直後は、リザルトの演出の裏に盤面が一瞬見えても新しい試合とはみなさない
                 if (latched && !o.mulligan && now - lastResultSeen < 45_000) return
                 latched = false
-                val p = pending ?: Pending(now).also { pending = it }
+                var p = pending ?: Pending(now).also { pending = it }
+                // 対戦を十分見たあとにマリガン画面が出た＝リザルトを見逃したまま次の試合が始まった
+                if (o.mulligan && p.playFrames > 20 && now - p.lastSeen > 0) {
+                    p.log(now, "◆前の試合の結果を見ないまま次の試合が始まったため、集計を新しくしました")
+                    p = Pending(now).also { pending?.thumb?.recycle(); pending = it }
+                }
                 p.lastSeen = now
                 p.battleFrames++
+                if (!o.mulligan) p.playFrames++
                 p.ppSecond += o.ppSecond
                 p.ppFirst += o.ppFirst
+                if (o.mulligan) { if (o.ppFirst > 0) p.mullFirst++ else p.mullSecond++ }
             }
             Kind.NONE -> {
                 hold?.let { commit(it, now) }
